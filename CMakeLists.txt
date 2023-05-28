@@ -4,4 +4,4 @@ project(os_ex3 C)
 set(CMAKE_C_FLAGS -pthread)
 
 
-add_executable(os_ex3 main.c)
+add_executable(os_ex3 main.c noa.c)

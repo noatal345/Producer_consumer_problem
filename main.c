@@ -37,7 +37,6 @@ struct BoundedQueue{
     int num_of_elements;
     int head_index;
     int tail_index;
-    bool is_full;
     pthread_mutex_t m;
     sem_t full;
     sem_t empty;
@@ -96,7 +95,6 @@ struct BoundedQueue *create_queue(int queue_size) {
     bounded_queue->num_of_elements = queue_size;
     bounded_queue->head_index = 0;
     bounded_queue->tail_index = 0;
-    bounded_queue->is_full = false;
     // initialize the mutex
     pthread_mutex_init(&bounded_queue->m, NULL);
     // initialize the semaphores
@@ -108,40 +106,22 @@ struct BoundedQueue *create_queue(int queue_size) {
 
 // This function adds an element to the queue
 bool enqueueBoundedQueue(struct BoundedQueue *queue, struct news *n) {
+    printf("enqueue head index=%d, tail index=%d, thread=%ld\n", queue->head_index, queue->tail_index, pthread_self());
     // check if the queue is uninitialized
     if (queue == NULL) {
         printf("Queue is uninitialized, thread=%ld\n", pthread_self());
         return false;
     }
-    bool end_flag = false;
-    // check if the queue is full
-    if (((queue->tail_index == queue->num_of_elements) && queue->head_index == 0) ||
-    (queue->tail_index == queue->head_index) && queue->head_index !=0) {
-        printf("head index=%d, tail index=%d, thread=%ld\n", queue->head_index, queue->tail_index, pthread_self());
-        printf("Queue is full, thread=%ld\n", pthread_self());
-        queue->is_full = true;
-        return false;
-    } else if ((queue->tail_index == queue->num_of_elements) && (queue->head_index != 0)) {
-        //print the head and tail indexes
-        printf("head index=%d, tail index=%d, thread=%ld\n", queue->head_index, queue->tail_index, pthread_self());
-        end_flag=true;
-    }
-    queue->is_full = false;
-    // add the news struct into the queue
-    // down the empty semaphore
+    // Acquire the empty semaphore to check if the queue is full
     sem_wait(&queue->empty);
-    //critical section - lock
+    // Lock the mutex to protect the critical section
     pthread_mutex_lock(&queue->m);
-    // push the news struct into the queue
+    // Add the news struct into the queue
     queue->queue_array[queue->tail_index] = *n;
-    //critical section - unlock
+    // Update the tail index and handle wrap-around
+    queue->tail_index = (queue->tail_index + 1) % queue->num_of_elements;
+    // Release the mutex and signal that the queue is not empty
     pthread_mutex_unlock(&queue->m);
-    if (end_flag) {
-        queue->tail_index = 0;
-    } else {
-        queue->tail_index++;
-    }
-    // up the full semaphore
     sem_post(&queue->full);
     return true;
 }
@@ -149,36 +129,22 @@ bool enqueueBoundedQueue(struct BoundedQueue *queue, struct news *n) {
 
 // This function removes an element from the queue
 bool dequeueBoundedQueue(struct BoundedQueue *queue, struct news *n){
+    printf("dequeue head index=%d, tail index=%d, thread=%ld\n", queue->head_index, queue->tail_index, pthread_self());
     // check if the queue is uninitialized
     if (queue == NULL) {
-        printf("Queue is uninitialized thread=%ld\n", pthread_self());
+        printf("Queue is uninitialized, thread=%ld\n", pthread_self());
         return false;
     }
-    // check if the queue is empty
-    if (((queue->head_index == queue->tail_index) && (queue->is_full == false)) ||
-            (queue->head_index == queue->tail_index) && (queue->head_index == queue->num_of_elements)){
-        printf("Queue is empty, thread=%ld\n", pthread_self());
-        queue->is_full = false;
-        return false;
-    }
-    // check if the queue is full
-    bool end_flag = false;
-    if ((queue->head_index == queue->num_of_elements) && (queue->tail_index != 0)) {
-        end_flag = true;
-    }
-    // down the full semaphore
+    // Acquire the full semaphore to check if the queue is empty
     sem_wait(&queue->full);
-    //critical section - lock
+    // Lock the mutex to protect the critical section
     pthread_mutex_lock(&queue->m);
+    // Retrieve the news struct from the queue
     *n = queue->queue_array[queue->head_index];
-    //critical section - unlock
+    // Update the head index and handle wrap-around
+    queue->head_index = (queue->head_index + 1) % queue->num_of_elements;
+    // Release the mutex and signal that the queue is not full
     pthread_mutex_unlock(&queue->m);
-    if (end_flag) {
-        queue->head_index = 0;
-    } else {
-        queue->head_index++;
-    }
-    // up the empty semaphore
     sem_post(&queue->empty);
     return true;
 }
@@ -202,9 +168,9 @@ void *producer(void *producer_info_p){
         n->product_number = i;
         n->type = types[rand()%3];
         enqueue = enqueueBoundedQueue(queue, n);
+        printf("producer, i=%d, thread num=%ld\n", i, pthread_self());
         if (enqueue){
             i++;
-            printf("producer, i=%d, thread num=%ld\n", i, pthread_self());
         }
     }
     while(1) {
@@ -218,6 +184,10 @@ void *producer(void *producer_info_p){
             printf("enqueue failed %ld\n", pthread_self());
         } else {
             printf("Producer %d has finished producing %d products\n", p->producer_id, p->num_of_products);
+            // close the semaphores
+            sem_close(&queue->full);
+            sem_close(&queue->empty);
+            // exit the thread
             break;
         }
     }
@@ -226,6 +196,7 @@ void *producer(void *producer_info_p){
 
 
 void *dispatcher(void *d){
+    // create an array to store all the news
     int counter = num_of_producers;
     while (counter != 0) {
         printf("dispatcher, counter %d, thread=%ld\n", counter, pthread_self());
@@ -236,17 +207,20 @@ void *dispatcher(void *d){
                 // dequeue the news struct from the queue
                 struct news *n = (struct news *) malloc(sizeof(struct news));
                 if (producers_queues[i] == NULL){
-                    printf("queue is NULL\n");
+                    break;
                 } else {
                     dequeue = dequeueBoundedQueue(producers_queues[i], n);
                     if (dequeue) {
                         if (strcmp(n->type, "DONE") == 0){
                             printf("DONE\n");
+                            producers_queues[i] = NULL;
                             counter--;
                         } else {
                             printf("news type=%s\n", n->type);
                         }
                     }
+                    // free n
+                    free(n);
                 }
             }
         }
@@ -286,5 +260,4 @@ int main(int argc, char **argv) {
     //free pi array
     printf("the program has finished\n");
     free(pi);
-    return 0;
 }
