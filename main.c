@@ -8,13 +8,16 @@
 #include <tgmath.h>
 #include <time.h>
 #include <pthread.h>
+#include <semaphore.h>
 
 
 // Global variables
 int num_of_producers;
 int co_editor_Q_size;
-//create a global array of pointers to the queues
+//create a global array of pointers to the producer's queues
 struct BoundedQueue **producers_queues;
+
+
 
 // Structs
 struct producer_info{
@@ -34,6 +37,10 @@ struct BoundedQueue{
     int num_of_elements;
     int head_index;
     int tail_index;
+    bool is_full;
+    pthread_mutex_t m;
+    sem_t full;
+    sem_t empty;
 };
 
 
@@ -64,7 +71,6 @@ bool read_file(char *file_name, struct producer_info *pi) {
         // if the file is over break the loop
         if (feof(file)) {
             co_editor_Q_size = temp;
-            printf("%s\n", "done");
             break;
         } else {
             // if the file isn't over store the producer id in the producer_info struct
@@ -82,62 +88,176 @@ bool read_file(char *file_name, struct producer_info *pi) {
     return true;
 }
 
+
 // This function creates a bounded queue with the given size
 struct BoundedQueue *create_queue(int queue_size) {
     struct BoundedQueue *bounded_queue = (struct BoundedQueue *) malloc(sizeof(struct BoundedQueue));
-    bounded_queue->queue_array = (struct news *) malloc(queue_size * sizeof(struct news));
+    bounded_queue->queue_array = (struct news *) malloc((queue_size-1) * sizeof(struct news));
     bounded_queue->num_of_elements = queue_size;
     bounded_queue->head_index = 0;
     bounded_queue->tail_index = 0;
+    bounded_queue->is_full = false;
+    // initialize the mutex
+    pthread_mutex_init(&bounded_queue->m, NULL);
+    // initialize the semaphores
+    sem_init(&bounded_queue->full, 0, 0);
+    sem_init(&bounded_queue->empty, 0, queue_size);
     return bounded_queue;
 }
 
 
 // This function adds an element to the queue
-void enqueueBoundedQueue(struct BoundedQueue *queue, struct news *n){
-    if (queue->tail_index == queue->num_of_elements){
-        queue->tail_index = 0;
+bool enqueueBoundedQueue(struct BoundedQueue *queue, struct news *n) {
+    // check if the queue is uninitialized
+    if (queue == NULL) {
+        printf("Queue is uninitialized, thread=%ld\n", pthread_self());
+        return false;
     }
-    if ((queue->tail_index == queue->head_index) && queue->tail_index != 0){
-        printf("Queue is full\n");
-        return;
+    bool end_flag = false;
+    // check if the queue is full
+    if (((queue->tail_index == queue->num_of_elements) && queue->head_index == 0) ||
+    (queue->tail_index == queue->head_index) && queue->head_index !=0) {
+        printf("head index=%d, tail index=%d, thread=%ld\n", queue->head_index, queue->tail_index, pthread_self());
+        printf("Queue is full, thread=%ld\n", pthread_self());
+        queue->is_full = true;
+        return false;
+    } else if ((queue->tail_index == queue->num_of_elements) && (queue->head_index != 0)) {
+        //print the head and tail indexes
+        printf("head index=%d, tail index=%d, thread=%ld\n", queue->head_index, queue->tail_index, pthread_self());
+        end_flag=true;
     }
+    queue->is_full = false;
     // add the news struct into the queue
+    // down the empty semaphore
+    sem_wait(&queue->empty);
+    //critical section - lock
+    pthread_mutex_lock(&queue->m);
+    // push the news struct into the queue
     queue->queue_array[queue->tail_index] = *n;
-    queue->tail_index++;
+    //critical section - unlock
+    pthread_mutex_unlock(&queue->m);
+    if (end_flag) {
+        queue->tail_index = 0;
+    } else {
+        queue->tail_index++;
+    }
+    // up the full semaphore
+    sem_post(&queue->full);
+    return true;
 }
 
 
 // This function removes an element from the queue
-void dequeueBoundedQueue(struct BoundedQueue *queue, struct news *n){
-    if (queue->head_index == queue->num_of_elements){
-        queue->head_index = 0;
+bool dequeueBoundedQueue(struct BoundedQueue *queue, struct news *n){
+    // check if the queue is uninitialized
+    if (queue == NULL) {
+        printf("Queue is uninitialized thread=%ld\n", pthread_self());
+        return false;
     }
-    if ((queue->head_index == queue->tail_index) && queue->head_index != 0){
-        printf("Queue is empty\n");
-        return;
+    // check if the queue is empty
+    if (((queue->head_index == queue->tail_index) && (queue->is_full == false)) ||
+            (queue->head_index == queue->tail_index) && (queue->head_index == queue->num_of_elements)){
+        printf("Queue is empty, thread=%ld\n", pthread_self());
+        queue->is_full = false;
+        return false;
     }
+    // check if the queue is full
+    bool end_flag = false;
+    if ((queue->head_index == queue->num_of_elements) && (queue->tail_index != 0)) {
+        end_flag = true;
+    }
+    // down the full semaphore
+    sem_wait(&queue->full);
+    //critical section - lock
+    pthread_mutex_lock(&queue->m);
     *n = queue->queue_array[queue->head_index];
-    queue->head_index++;
+    //critical section - unlock
+    pthread_mutex_unlock(&queue->m);
+    if (end_flag) {
+        queue->head_index = 0;
+    } else {
+        queue->head_index++;
+    }
+    // up the empty semaphore
+    sem_post(&queue->empty);
+    return true;
 }
 
 
-void *producer(struct producer_info *p){
+void *producer(void *producer_info_p){
+    //sleep for 0.5 seconds
+//    usleep(500000);
+    struct producer_info *p = (struct producer_info *) producer_info_p;
     // create a queue for the producer in the global array
     struct BoundedQueue *queue = create_queue(p->queue_size);;
+    printf("Done creating queue number %d, thread=%ld\n", p->producer_id ,pthread_self());
     // add the queue to the global array
     producers_queues[p->producer_id-1] = queue;
     char *types[3] = {"SPORTS", "NEWS", "WEATHER"};
-    for(int i = 0; i < p->num_of_products; i++){
+    int i = 0;
+    bool enqueue = false;
+    while (i < p->num_of_products) {
         struct news *n = (struct news *) malloc(sizeof(struct news));
         n->producer_id = p->producer_id;
         n->product_number = i;
         n->type = types[rand()%3];
-        enqueueBoundedQueue(queue, n);
+        enqueue = enqueueBoundedQueue(queue, n);
+        if (enqueue){
+            i++;
+            printf("producer, i=%d, thread num=%ld\n", i, pthread_self());
+        }
+    }
+    while(1) {
+        // when the producer is done adding all the products, it adds a done news struct to the queue
+        struct news *done = (struct news *) malloc(sizeof(struct news));
+        done->producer_id = p->producer_id;
+        done->product_number = -1;
+        done->type = "DONE";
+        enqueue = enqueueBoundedQueue(queue, done);
+        if (!enqueue){
+            printf("enqueue failed %ld\n", pthread_self());
+        } else {
+            printf("Producer %d has finished producing %d products\n", p->producer_id, p->num_of_products);
+            break;
+        }
+    }
+    // End of producer thread
+}
+
+
+void *dispatcher(void *d){
+    int counter = num_of_producers;
+    while (counter != 0) {
+        printf("dispatcher, counter %d, thread=%ld\n", counter, pthread_self());
+        // RR the producers queues until they are all empty
+        for (int i = 0; i < num_of_producers; i++){
+            bool dequeue = false;
+            while (!dequeue) {
+                // dequeue the news struct from the queue
+                struct news *n = (struct news *) malloc(sizeof(struct news));
+                if (producers_queues[i] == NULL){
+                    printf("queue is NULL\n");
+                } else {
+                    dequeue = dequeueBoundedQueue(producers_queues[i], n);
+                    if (dequeue) {
+                        if (strcmp(n->type, "DONE") == 0){
+                            printf("DONE\n");
+                            counter--;
+                        } else {
+                            printf("news type=%s\n", n->type);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
+
+
+
 // This is the main program
 // The program receives a configuration file as argument and store the file data into global variables.
+// Then it creates a thread for each producer in the producer queues and runs the producer function.
 int main(int argc, char **argv) {
     // Check if the user has provided a configuration file
     if (argc < 2) {
@@ -147,17 +267,24 @@ int main(int argc, char **argv) {
     // call the read_file function with an empty struct array
     struct producer_info *pi;
     pi = (struct producer_info *) malloc(100);
-    // send the file name and the empty struct array
+    // send the file name and the empty array to read file function to fill the struct array
     read_file(argv[1], pi);
     // create an array of pointers to bounded queues
     producers_queues = (struct BoundedQueue **) malloc(num_of_producers * sizeof(struct BoundedQueue *));
-    // create a new thread for each producer to run the producer function
+    printf("The main thread id= %ld\n", pthread_self());
+    //create a new producer thread for each producer to run the producer function
     for (int i = 0; i < num_of_producers; i++){
-        pthread_t thread;
-        pthread_attr_t *attr = NULL;
-        int pthread_create(thread, attr, producer, &pi[i]);
+        // create a producer thread
+        pthread_t producer_thread;
+        pthread_create(&producer_thread, NULL, producer, &pi[i]);
     }
+    // create a dispatcher thread
+    pthread_t dispatcher_thread;
+    pthread_create(&dispatcher_thread, NULL, dispatcher, NULL);
+    // wait for the dispatcher thread to finish
+    pthread_join(dispatcher_thread, NULL);
     //free pi array
+    printf("the program has finished\n");
     free(pi);
     return 0;
 }
