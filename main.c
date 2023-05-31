@@ -1,13 +1,9 @@
 //Noa Tal 209327279
 #include <stdio.h>
-#include <fcntl.h>
 #include <stdbool.h>
 #include <unistd.h>
-#include <malloc.h>
 #include <stdlib.h>
 #include <string.h>
-#include <tgmath.h>
-#include <time.h>
 #include <pthread.h>
 #include <semaphore.h>
 
@@ -267,18 +263,17 @@ void *producer(void *producer_info_p) {
     struct BoundedQueue *queue = create_Bqueue(p->queue_size);;
     // add the queue to the global array
     producers_queues[p->producer_id-1] = queue;
+    int type_counter[3] = {0, 0, 0};
     char *types[3] = {"SPORTS", "NEWS", "WEATHER"};
-    int i = 0;
     bool enqueue = false;
-    while (i < p->num_of_products) {
+    for(int i = 0; i < p->num_of_products; i++) {
         struct news *n = (struct news *) malloc(sizeof(struct news));
-        n->producer_id = p->producer_id;
-        n->product_number = i;
-        n->type = types[rand()%3];
-        enqueue = enqueueBoundedQueue(queue, n);
-        if (enqueue){
-            i++;
-        }
+        n->producer_id = p->producer_id-1;
+        int index = rand() % 3;
+        n->type = types[index];
+        n->product_number = type_counter[index];
+        type_counter[index] += 1;
+        while(!enqueueBoundedQueue(queue, n)){}
     }
     while(1) {
         // when the producer is done adding all the products, it adds a done news struct to the queue
@@ -290,9 +285,6 @@ void *producer(void *producer_info_p) {
         if (!enqueue){
             printf("enqueue failed %ld\n", pthread_self());
         } else {
-            // close the semaphores
-//            sem_close(&queue->full);
-//            sem_close(&queue->empty);
             // exit the thread
             break;
         }
@@ -303,12 +295,6 @@ void *producer(void *producer_info_p) {
 
 // This function is the dispatcher(consumer) thread function
 void *dispatcher(void *d) {
-    // initialize the 3 co editors queues
-    //todo the unbounded queue size
-    int size = 100;
-    sports_queue = create_Uqueue(size);
-    news_queue = create_Uqueue(size);
-    weather_queue = create_Uqueue(size);
     // create an array to store all the news
     int counter = num_of_producers;
     while (counter != 0) {
@@ -339,6 +325,7 @@ void *dispatcher(void *d) {
                         }
                     }
                 } else {
+                    // if dequeue failed-the current queue is empty, continue
                     continue;
                 }
                 // free n
@@ -354,24 +341,7 @@ void *dispatcher(void *d) {
     while (!enqueueUnboundedQueue(sports_queue, done));
     while (!enqueueUnboundedQueue(news_queue, done));
     while (!enqueueUnboundedQueue(weather_queue, done));
-//    // close the semaphores
-//    sem_close(&sports_queue->full);
-//    sem_close(&sports_queue->empty);
-//    sem_close(&news_queue->full);
-//    sem_close(&news_queue->empty);
-//    sem_close(&weather_queue->full);
-//    sem_close(&weather_queue->empty);
-// free the producers queues
-//    for (int i = 0; i < num_of_producers; i++){
-//        free(producers_queues[i]);
-//    }
     // End of dispatcher thread
-
-//    //print all the sports queue news without dequeue
-//    for(int i = 0; i < sports_queue->num_of_elements; i++){
-//        printf("sports queue %d: %d %d %s\n", i, sports_queue->queue_array[i].producer_id, sports_queue->queue_array[i].product_number, sports_queue->queue_array[i].type);
-//    }
-
 }
 
 
@@ -393,13 +363,11 @@ void *co_editor(void *news_type_queue) {
                     // Simulate The editing by waiting 0.1 seconds
                     usleep(100000);
                     bool enq = false;
-                    while(!enq){
+                    while(!enq) {
                         // add the news struct to the screen manager queue
                         enq = enqueueBoundedQueue(co_editors_queue, n);
                     }
                 }
-            } else {
-//                printf("dequeue failed %ld\n", pthread_self());
             }
             // free n
             free(n);
@@ -414,11 +382,7 @@ void *co_editor(void *news_type_queue) {
     while(!enq) {
         enq = enqueueBoundedQueue(co_editors_queue, done);
     }
-    // close the semaphores
-//    sem_close(&queue->full);
-//    sem_close(&queue->empty);
     // End of co editor thread
-    // end thread
 }
 
 
@@ -439,7 +403,7 @@ void *screen_manager(void *screen_manager_queue) {
                     down_counter--;
                 } else {
                     // produce the news - print the news to the screen
-                    printf("%d producer %d %s %d\n", i, n->producer_id, n->type, n->product_number);
+                    printf("producer %d %s %d\n", n->producer_id, n->type, n->product_number);
                     i++;
                 }
             }
@@ -448,10 +412,7 @@ void *screen_manager(void *screen_manager_queue) {
         }
     }
     // print the done message
-    printf("Done\n");
-    // close the semaphores
-//    sem_close(&queue->full);
-//    sem_close(&queue->empty);
+    printf("DONE\n");
     // End of screen manager thread
 }
 
@@ -487,12 +448,18 @@ int main(int argc, char **argv) {
         pthread_create(&producer_thread, NULL, producer, &pi[i]);
     }
 
+    // initialize the 3 co editors queues
+    int size = 100;
+    sports_queue = create_Uqueue(size);
+    news_queue = create_Uqueue(size);
+    weather_queue = create_Uqueue(size);
+
     // create a dispatcher thread
     pthread_t dispatcher_thread;
     pthread_create(&dispatcher_thread, NULL, dispatcher, NULL);
 
-    while (sports_queue == NULL || news_queue == NULL || weather_queue == NULL) {
-    }
+//    while (sports_queue == NULL || news_queue == NULL || weather_queue == NULL) {}
+
     // create 3 co-editor threads
     pthread_t co_editor_thread1;
     pthread_create(&co_editor_thread1, NULL, co_editor, sports_queue);
