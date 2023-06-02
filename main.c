@@ -7,15 +7,13 @@
 #include <pthread.h>
 #include <semaphore.h>
 
-//TODO delete prints
 
 // Global variables
 int num_of_producers;
-//todo delete it's unbounded
-int num_of_news;
 int co_editors_Q_size;
 
-//create a global arrays
+//Global arrays
+struct producer_info *pi;
 struct BoundedQueue **producers_queues;
 struct UnboundedQueue *sports_queue;
 struct UnboundedQueue *weather_queue;
@@ -57,7 +55,7 @@ struct UnboundedQueue{
 
 
 //Function declarations
-bool read_file(char *file_name, struct producer_info *pi);
+bool read_file(char *file_name);
 struct BoundedQueue *create_Bqueue(int queue_size);
 bool enqueueBoundedQueue(struct BoundedQueue *queue, struct news *n);
 bool dequeueBoundedQueue(struct BoundedQueue *queue, struct news *n);
@@ -78,14 +76,34 @@ void *screen_manager(void *screen_manager_queue);
 // 2nd line is the number of products
 // 3rd line is the queue size
 // the last line of the file is the size of the co-editor queue.
-bool read_file(char *file_name, struct producer_info *pi) {
+bool read_file(char *file_name) {
+    //get the number of lines in the file to bound the number of potential producers
+    int lines = 0;
     // open the configuration file for reading
     FILE *file = fopen(file_name, "r");
     if (file == NULL) {
         perror("Error in: fopen");
         return false;
     }
-    num_of_news = 0;
+    // count the number of lines in the file
+    char c;
+    while ((c = fgetc(file)) != EOF) {
+        if (c == '\n') {
+            lines++;
+        }
+    }
+    // close and re-open the file to reset the file pointer
+    fclose(file);
+    // open the configuration file for reading
+    file = fopen(file_name, "r");
+    if (file == NULL) {
+        perror("Error in: fopen");
+        return false;
+    }
+    printf("before malloc\n");
+    // create an empty producer_info struct array
+    pi = (struct producer_info *) malloc(sizeof(struct producer_info) * lines);
+    printf("after malloc\n");
     int producer_num = 0;
     // read the file line by line
     while (1) {
@@ -105,8 +123,6 @@ bool read_file(char *file_name, struct producer_info *pi) {
         fscanf(file, "%d", &(pi[producer_num].num_of_products));
         // read the queue size
         fscanf(file, "%d", &(pi[producer_num].queue_size));
-        // update the number of news
-        num_of_news += pi[producer_num].num_of_products;
         //continue to the next producer
         producer_num++;
     }
@@ -118,8 +134,11 @@ bool read_file(char *file_name, struct producer_info *pi) {
 
 // This function creates a bounded queue with a given size
 struct UnboundedQueue *create_Uqueue(int s) {
+    printf("in create_Uqueue before malloc\n");
     struct UnboundedQueue *unbounded_queue = (struct UnboundedQueue *) malloc(sizeof(struct UnboundedQueue));
+    printf("in create_Uqueue after first malloc\n");
     unbounded_queue->queue_array = (struct news *) malloc(sizeof(struct news) * s);
+    printf("in create_Uqueue after second malloc\n");
     unbounded_queue->num_of_elements = s;
     unbounded_queue->size = 0;
     unbounded_queue->head_index = 0;
@@ -135,16 +154,11 @@ struct UnboundedQueue *create_Uqueue(int s) {
 //This function Increase the Unbounded queue array if it's full
 struct UnboundedQueue *increase_queue_array(struct UnboundedQueue *queue) {
     int new_size = queue->num_of_elements * 2;
-    struct news *new_queue_array = (struct news *) malloc(sizeof(struct news) * new_size);
-    for (int i = 0; i < queue->num_of_elements; i++) {
-        new_queue_array[i] = queue->queue_array[i];
-    }
     // lock this critical section
     pthread_mutex_lock(&queue->m);
-    //free the old queue array
-    free(queue->queue_array);
+    //realloc the queue array of the unbounded queue to the new size
+    queue->queue_array = (struct news *) realloc(queue->queue_array, sizeof(struct news) * new_size);
     queue->num_of_elements = new_size;
-    queue->queue_array = new_queue_array;
     queue->tail_index = queue->size;
     // unlock the critical section
     pthread_mutex_unlock(&queue->m);
@@ -202,8 +216,11 @@ bool dequeueUnboundedQueue(struct UnboundedQueue *queue, struct news *n) {
 
 // This function creates a bounded queue with a given size
 struct BoundedQueue *create_Bqueue(int queue_size) {
+    printf("in create_Bqueue before malloc\n");
     struct BoundedQueue *bounded_queue = (struct BoundedQueue *) malloc(sizeof(struct BoundedQueue));
+    printf("in create_bqueue after first malloc\n");
     bounded_queue->queue_array = (struct news *) malloc((queue_size-1) * sizeof(struct news));
+    printf("in create_bqueue after second malloc\n");
     bounded_queue->num_of_elements = queue_size;
     bounded_queue->head_index = 0;
     bounded_queue->tail_index = 0;
@@ -266,8 +283,10 @@ void *producer(void *producer_info_p) {
     int type_counter[3] = {0, 0, 0};
     char *types[3] = {"SPORTS", "NEWS", "WEATHER"};
     bool enqueue = false;
+    struct news news;
+    struct news *n = &news;
+    // add all the products to the queue
     for(int i = 0; i < p->num_of_products; i++) {
-        struct news *n = (struct news *) malloc(sizeof(struct news));
         n->producer_id = p->producer_id-1;
         int index = rand() % 3;
         n->type = types[index];
@@ -275,28 +294,21 @@ void *producer(void *producer_info_p) {
         type_counter[index] += 1;
         while(!enqueueBoundedQueue(queue, n)){}
     }
-    while(1) {
-        // when the producer is done adding all the products, it adds a done news struct to the queue
-        struct news *done = (struct news *) malloc(sizeof(struct news));
-        done->producer_id = p->producer_id;
-        done->product_number = -1;
-        done->type = "DONE";
-        enqueue = enqueueBoundedQueue(queue, done);
-        if (!enqueue){
-            printf("enqueue failed %ld\n", pthread_self());
-        } else {
-            // exit the thread
-            break;
-        }
-    }
+    // When the producer is done adding all the products, it adds a "done" news struct to the queue
+    n->producer_id = p->producer_id;
+    n->product_number = -1;
+    n->type = "DONE";
+    while(!enqueueBoundedQueue(queue, n)){}
     // End of producer thread
+    pthread_exit(NULL);
 }
 
 
 // This function is the dispatcher(consumer) thread function
 void *dispatcher(void *d) {
-    // create an array to store all the news
     int counter = num_of_producers;
+    struct news new;
+    struct news *n = &new;
     while (counter != 0) {
         // RR the producers queues until they are all empty
         for (int i = 0; i < num_of_producers; i++){
@@ -305,7 +317,6 @@ void *dispatcher(void *d) {
             } else {
                 bool dequeue = false;
                 // dequeue the news struct from the queue
-                struct news *n = (struct news *) malloc(sizeof(struct news));
                 dequeue = dequeueBoundedQueue(producers_queues[i], n);
                 if (dequeue) {
                     if (strcmp(n->type, "DONE") == 0){
@@ -328,20 +339,18 @@ void *dispatcher(void *d) {
                     // if dequeue failed-the current queue is empty, continue
                     continue;
                 }
-                // free n
-                free(n);
             }
         }
     }
-    // when all the producers are done, add a done news struct to each co editor queue
-    struct news *done = (struct news *) malloc(sizeof(struct news));
-    done->producer_id = -1;
-    done->product_number = -1;
-    done->type = "DONE";
-    while (!enqueueUnboundedQueue(sports_queue, done));
-    while (!enqueueUnboundedQueue(news_queue, done));
-    while (!enqueueUnboundedQueue(weather_queue, done));
+    // When all the producers are done, add a done news struct to each co editor queue
+    n->producer_id = -1;
+    n->product_number = -1;
+    n->type = "DONE";
+    while (!enqueueUnboundedQueue(sports_queue, n));
+    while (!enqueueUnboundedQueue(news_queue, n));
+    while (!enqueueUnboundedQueue(weather_queue, n));
     // End of dispatcher thread
+    pthread_exit(NULL);
 }
 
 
@@ -349,12 +358,13 @@ void *dispatcher(void *d) {
 void *co_editor(void *news_type_queue) {
     // get the co editor queue pointer from c (one of the news types)
     struct UnboundedQueue *queue = (struct UnboundedQueue *) news_type_queue;
+    struct news news;
+    struct news *n = &news;
     bool flag = false;
     while(!flag){
         bool dequeue = false;
         while (!dequeue) {
             // dequeue the news from the relevant dispatcher-co-editor queue
-            struct news *n = (struct news *) malloc(sizeof(struct news));
             dequeue = dequeueUnboundedQueue(queue, n);
             if (dequeue) {
                 if (strcmp(n->type, "DONE") == 0){
@@ -369,51 +379,47 @@ void *co_editor(void *news_type_queue) {
                     }
                 }
             }
-            // free n
-            free(n);
         }
     }
-    // when the co editor is done, add a done news struct to the screen manager queue
-    struct news *done = (struct news *) malloc(sizeof(struct news));
-    done->producer_id = -1;
-    done->product_number = -1;
-    done->type = "DONE";
+    // When the co editor is done, add a done news struct to the screen manager queue
+    n->producer_id = -1;
+    n->product_number = -1;
+    n->type = "DONE";
     bool enq = false;
-    while(!enq) {
-        enq = enqueueBoundedQueue(co_editors_queue, done);
-    }
+    while(!enqueueBoundedQueue(co_editors_queue, n));
     // End of co editor thread
+    pthread_exit(NULL);
 }
 
 
 // This function is the screen manager thread function
 void *screen_manager(void *screen_manager_queue) {
     int down_counter = 3;
-    int i = 0;
+    int i = 1;
     // get the co editors combined queue from screen_manager_queue
     struct BoundedQueue *queue = (struct BoundedQueue *) screen_manager_queue;
+    struct news news;
+    struct news *n = &news;
     while(down_counter != 0) {
         bool dequeue = false;
         while (!dequeue) {
             // dequeue the news struct from the co-editors-screen manager queue
-            struct news *n = (struct news *) malloc(sizeof(struct news));
             dequeue = dequeueBoundedQueue(queue, n);
             if (dequeue) {
                 if (strcmp(n->type, "DONE") == 0){
                     down_counter--;
                 } else {
                     // produce the news - print the news to the screen
-                    printf("producer %d %s %d\n", n->producer_id, n->type, n->product_number);
+                    printf("%d producer %d %s %d\n", i, n->producer_id, n->type, n->product_number);
                     i++;
                 }
             }
-            // free n
-            free(n);
         }
     }
     // print the done message
     printf("DONE\n");
     // End of screen manager thread
+    pthread_exit(NULL);
 }
 
 
@@ -427,65 +433,154 @@ int main(int argc, char **argv) {
         printf("Please provide a configuration file.\n");
         return -1;
     }
-    // call the read_file function with an empty struct array
-    struct producer_info *pi;
-    // todo replace 100
-    pi = (struct producer_info *) malloc(100);
-    // send the file name and the empty array to read file function to fill the struct array
-    read_file(argv[1], pi);
-
+    // send the file name to read file function to fill the producers_info struct array
+    bool r = read_file(argv[1]);
+    if(!r){
+        printf("Error reading the configuration file.\n");
+        exit(-1);
+    }
+    printf("after reading file\n");
+    printf("%d\n", num_of_producers);
+    printf("%d\n", co_editors_Q_size);
+    printf("%lu\n", sizeof(struct BoundedQueue *));
 
     // create an array of pointers to bounded queues for each producer
     producers_queues = (struct BoundedQueue **) malloc(num_of_producers * sizeof(struct BoundedQueue *));
+    printf("after malloc\n");
     // create the co editors queue to the screen manager
     co_editors_queue = create_Bqueue(co_editors_Q_size);
-
+    int return_value;
 
     //create a new producer thread for each producer to run the producer function
     for (int i = 0; i < num_of_producers; i++){
         // create a producer thread
         pthread_t producer_thread;
-        pthread_create(&producer_thread, NULL, producer, &pi[i]);
+        return_value = pthread_create(&producer_thread, NULL, producer, &pi[i]);
+        if(return_value != 0){
+            perror("Error creating producer thread\n");
+            exit(-1);
+        }
     }
 
     // initialize the 3 co editors queues
-    int size = 100;
+    int size = 200;
     sports_queue = create_Uqueue(size);
     news_queue = create_Uqueue(size);
     weather_queue = create_Uqueue(size);
 
     // create a dispatcher thread
     pthread_t dispatcher_thread;
-    pthread_create(&dispatcher_thread, NULL, dispatcher, NULL);
+    return_value = pthread_create(&dispatcher_thread, NULL, dispatcher, NULL);
+    if(return_value != 0){
+        perror("Error creating dispatcher thread\n");
+        exit(-1);
+    }
 
-//    while (sports_queue == NULL || news_queue == NULL || weather_queue == NULL) {}
 
     // create 3 co-editor threads
     pthread_t co_editor_thread1;
-    pthread_create(&co_editor_thread1, NULL, co_editor, sports_queue);
+    return_value = pthread_create(&co_editor_thread1, NULL, co_editor, sports_queue);
+    if(return_value != 0){
+        perror("Error creating co-editor thread\n");
+        exit(-1);
+    }
     pthread_t co_editor_thread2;
-    pthread_create(&co_editor_thread2, NULL, co_editor, news_queue);
+    return_value = pthread_create(&co_editor_thread2, NULL, co_editor, news_queue);
+    if(return_value != 0){
+        perror("Error creating co-editor thread\n");
+        exit(-1);
+    }
     pthread_t co_editor_thread3;
-    pthread_create(&co_editor_thread3, NULL, co_editor, weather_queue);
-
+    return_value = pthread_create(&co_editor_thread3, NULL, co_editor, weather_queue);
+    if(return_value != 0){
+        perror("Error creating co-editor thread\n");
+        exit(-1);
+    }
 
     // create a screen manager thread
     pthread_t screen_manager_thread;
-    pthread_create(&screen_manager_thread, NULL, screen_manager, co_editors_queue);
-
+    return_value = pthread_create(&screen_manager_thread, NULL, screen_manager, co_editors_queue);
+    if(return_value != 0){
+        perror("Error creating screen manager thread\n");
+        exit(-1);
+    }
     // wait for all the threads to finish
     pthread_join(screen_manager_thread, NULL);
 
-    //free pi array
-    printf("the program has finished\n");
-    free(pi);
 
-    //free the queues
-    free(sports_queue);
-    free(news_queue);
-    free(weather_queue);
-    free(co_editors_queue);
-    free(producers_queues);
+
+
+    //**********************************************************
+    // Free the memory left allocated in the program if possible
+    if (pi != NULL) {
+        printf("pi != NULL\n");
+        free(pi);
+        pi = NULL;
+    }
+    printf("after freeing pi\n");
+    if (producers_queues != NULL) {
+        printf("producers_queues != NULL\n");
+        for (int i = 0; i < num_of_producers; i++) {
+            if (producers_queues[i] != NULL) {
+                printf("producers_queues[%d] != NULL\n", i);
+                if(producers_queues[i]->queue_array != NULL){
+                    free(producers_queues[i]->queue_array);
+                    producers_queues[i]->queue_array = NULL;
+                }
+                free(producers_queues[i]);
+                producers_queues[i] = NULL;
+            }
+        }
+        printf("after for loop\n");
+        free(producers_queues);
+        producers_queues = NULL;
+    }
+    printf("done with producers queue\n");
+    if (sports_queue != NULL) {
+        printf("sports_queue != NULL\n");
+        if(sports_queue->queue_array != NULL){
+            printf("sports_queue->queue_array != NULL\n");
+            free(sports_queue->queue_array);
+            sports_queue->queue_array = NULL;
+        }
+        free(sports_queue);
+        sports_queue = NULL;
+    }
+    printf("done with sports queue\n");
+    if (news_queue != NULL) {
+        printf("news_queue != NULL\n");
+        if(news_queue->queue_array != NULL){
+            printf("news_queue->queue_array != NULL\n");
+            free(news_queue->queue_array);
+            news_queue->queue_array = NULL;
+        }
+        free(news_queue);
+        news_queue = NULL;
+    }
+    printf("done with news queue\n");
+    if (weather_queue != NULL) {
+        printf("weather_queue != NULL\n");
+        if(weather_queue->queue_array != NULL){
+            printf("weather_queue->queue_array != NULL\n");
+            free(weather_queue->queue_array);
+            weather_queue->queue_array = NULL;
+        }
+        free(weather_queue);
+        weather_queue = NULL;
+    }
+    printf("done with weather queue\n");
+    if (co_editors_queue != NULL) {
+        printf("co_editors_queue != NULL\n");
+        if(co_editors_queue->queue_array != NULL){
+            printf("co_editors_queue->queue_array != NULL\n");
+            free(co_editors_queue->queue_array);
+            co_editors_queue->queue_array = NULL;
+        }
+        free(co_editors_queue);
+        co_editors_queue = NULL;
+    }
+    printf("done with co editors queue\n");
+
     // End of main program
     return 0;
 }
