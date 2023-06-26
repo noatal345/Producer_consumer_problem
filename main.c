@@ -1,4 +1,4 @@
-//Noa Tal 209327279
+
 #include <stdio.h>
 #include <stdbool.h>
 #include <unistd.h>
