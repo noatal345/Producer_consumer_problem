@@ -12,10 +12,10 @@ Upon completion, the dispatcher sends "DONE" messages to each co-editor queue.
 
 **Co-Editors**: Each co-editor dequeues news stories from the dispatcher's queue.
 Simulates editing by blocking for 0.1 seconds.
-Edited stories are enqueued into the shared co-editor to screen manager queue.
+Edited stories are enqueued into the shared co-editor to the screen manager queue.
 Upon receiving a "DONE" message, it immediately passes it to the screen manager.
 
-**Screen Manager**: Dequeues edited news stories from the co-editor to screen manager queue.
+**Screen Manager**: Dequeues edited news stories from the co-editor to the screen manager queue.
 Prints news stories to the console.
 Displays a "DONE" statement after receiving three "DONE" messages.
 
